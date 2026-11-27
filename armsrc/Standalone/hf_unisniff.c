@@ -169,6 +169,7 @@ void RunMod(void) {
 
     Dbprintf(_YELLOW_("HF UNISNIFF started"));
 
+    // Keep protocol names short so numbered trace filenames fit SPIFFS_OBJ_NAME_LEN.
     const char *protocols[] = {"14a", "14b", "15", "iclass", "user"};
 
     // some magic to allow for `hw standalone` command to trigger a particular sniff from inside the pm3 client
@@ -197,85 +198,63 @@ void RunMod(void) {
 #ifdef WITH_FLASH
     uint8_t save_mode = HF_UNISNIFF_SAVE_MODE;
     rdv40_spiffs_lazy_mount();
-    // Allocate memory now for buffer for filename to save to.  Who knows what'll be
-    // available after filling the trace buffer.
-    char *filename = (char *)BigBuf_calloc(64);
-    if (filename == NULL) {
-        Dbprintf("Failed to allocate memory");
-        return;
-    }
     // Read the config file.  Size is limited to defined value so as not to consume
     // stupid amounts of stack
     if (exists_in_spiffs(HF_UNISNIFF_CONFIG)) {
 
         uint32_t fsize = size_in_spiffs(HF_UNISNIFF_CONFIG);
         if (fsize > HF_UNISNIFF_CONFIG_SIZE) {
-            fsize = HF_UNISNIFF_CONFIG_SIZE;
-        }
+            Dbprintf("Ignoring oversized %s", HF_UNISNIFF_CONFIG);
+        } else if (fsize > 0) {
+            char config_buffer[HF_UNISNIFF_CONFIG_SIZE + 1] = {0};
+            rdv40_spiffs_read_as_filetype(HF_UNISNIFF_CONFIG, (uint8_t *)config_buffer, fsize, RDV40_SPIFFS_SAFETY_SAFE);
 
-        char config_buffer[HF_UNISNIFF_CONFIG_SIZE];
-        char *d = &config_buffer[0];
-
-        rdv40_spiffs_read_as_filetype(HF_UNISNIFF_CONFIG
-                                      , (uint8_t *)d
-                                      , fsize
-                                      , RDV40_SPIFFS_SAFETY_SAFE
-                                     );
-
-        // This parser is terrible but I think fairly memory efficient?  Maybe better to use JSON?
-        char *x = d;
-        char *y = x;
-
-        // strip out all the whitespace and Windows line-endings
-        do {
-
-            while (*y == 0x20 || *y == 0x09 || *y == 0x0D) {
-                ++y;
-            }
-        } while ((*x++ = c_tolower(*y++)));
-
-        char *token  = strchr(d, '\n');
-
-        while (token != NULL) {
-            *token++ = '\0';
-            char *tag = strtok(d, "=");
-            char *value = strtok(NULL, "\n");
-
-            if (tag != NULL && value != NULL) {
-
-                if (strcmp(tag, "protocol") == 0) {
-                    // If we got a selection here, override compile-time selection
-                    for (uint8_t i = 0; i < ARRAYLEN(protocols); i++) {
-                        if (strcmp(protocols[i], value) == 0) {
-                            sniff_protocol = i;
-                            break;
-                        }
-                    }
-
-                } else if (strcmp(tag, "save") == 0) {
-
-                    // Assume NEW
-                    save_mode = HF_UNISNIFF_SAVE_MODE_NEW;
-
-                    if (strcmp(value, "append") == 0) {
-                        save_mode = HF_UNISNIFF_SAVE_MODE_APPEND;
-                    }
-
-                    if (strcmp(value, "none") == 0) {
-                        save_mode = HF_UNISNIFF_SAVE_MODE_NONE;
-                    }
+            // strip out all the whitespace and Windows line-endings
+            char *out = config_buffer;
+            for (const char *in = config_buffer; *in != '\0'; in++) {
+                if (*in != ' ' && *in != '\t' && *in != '\r') {
+                    *out++ = c_tolower(*in);
                 }
             }
-            d = token;
-            token = strchr(d, '\n');
-        }
+            *out = '\0';
 
-        if (g_dbglevel >= DBG_DEBUG) {
-            const char *save_modes[] = {"new", "append", "none"};
-            Dbprintf("Run-time configured protocol.... %s ( %u )", protocols[sniff_protocol], sniff_protocol);
-            Dbprintf("Run-time configured save_mode... %s ( %u )", save_modes[save_mode], sniff_protocol);
-        }
+            for (char *tag = config_buffer; tag != NULL;) {
+                char *next = strchr(tag, '\n');
+                if (next != NULL) {
+                    *next++ = '\0';
+                }
 
+                char *value = strchr(tag, '=');
+                if (value != NULL && value[1] != '\0') {
+                    *value++ = '\0';
+
+                    if (strcmp(tag, "protocol") == 0) {
+                        // If we got a selection here, override compile-time selection
+                        for (uint8_t i = 0; i < ARRAYLEN(protocols); i++) {
+                            if (strcmp(protocols[i], value) == 0) {
+                                sniff_protocol = i;
+                                break;
+                            }
+                        }
+                    } else if (strcmp(tag, "save") == 0) {
+                        // Assume NEW
+                        save_mode = HF_UNISNIFF_SAVE_MODE_NEW;
+                        if (strcmp(value, "append") == 0) {
+                            save_mode = HF_UNISNIFF_SAVE_MODE_APPEND;
+                        } else if (strcmp(value, "none") == 0) {
+                            save_mode = HF_UNISNIFF_SAVE_MODE_NONE;
+                        }
+                    }
+                }
+                tag = next;
+            }
+
+            if (g_dbglevel >= DBG_DEBUG) {
+                const char *save_modes[] = {"new", "append", "none"};
+                Dbprintf("Run-time configured protocol.... %s ( %u )", protocols[sniff_protocol], sniff_protocol);
+                Dbprintf("Run-time configured save_mode... %s ( %u )", save_modes[save_mode], save_mode);
+            }
+        }
     }
 #endif
 
@@ -372,6 +351,7 @@ void RunMod(void) {
 
         uint8_t *trace_buffer = BigBuf_get_addr();
 
+        char filename[64];
         sprintf(filename, "%s_%s%s", HF_UNISNIFF_LOGFILE, protocols[sniff_protocol], HF_UNISNIFF_LOGEXT);
 
         if (save_mode == HF_UNISNIFF_SAVE_MODE_NEW) {
